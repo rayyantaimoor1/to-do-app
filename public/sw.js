@@ -1,4 +1,4 @@
-const CACHE_NAME = "todo-app-shell-v2";
+const CACHE_NAME = "todo-app-shell-v3";
 const APP_SHELL = [
   "/",
   "/manifest.json",
@@ -86,4 +86,52 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith(networkFirst(request));
+});
+
+// ─────────────────────────────────────────────────────────
+// Push (M5) — payload is { title, body, tag, url } from reminder-sweep
+// ─────────────────────────────────────────────────────────
+
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { body: event.data ? event.data.text() : "" };
+  }
+
+  event.waitUntil(
+    self.registration.showNotification(data.title || "To-Do App", {
+      body: data.body || "",
+      // Same tag = replace rather than stack (§6.5).
+      tag: data.tag,
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      data: { url: data.url || "/" },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = new URL(
+    (event.notification.data && event.notification.data.url) || "/",
+    self.location.origin,
+  ).href;
+
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      for (const client of windows) {
+        if (new URL(client.url).origin !== self.location.origin) continue;
+        await client.focus();
+        client.postMessage({ type: "open-url", url });
+        return;
+      }
+      await self.clients.openWindow(url);
+    })(),
+  );
 });

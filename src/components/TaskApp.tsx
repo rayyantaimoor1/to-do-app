@@ -7,6 +7,12 @@ import { supabase } from "@/lib/supabase";
 import { db } from "@/lib/db";
 import { startSync } from "@/lib/sync";
 import {
+  enableWebPush,
+  refreshWebPush,
+  webPushState,
+  type PushState,
+} from "@/lib/push";
+import {
   createTask,
   deleteTask,
   setTaskStatus,
@@ -27,6 +33,15 @@ const VIEWS: { key: View; label: string }[] = [
   { key: "overdue", label: "Overdue" },
 ];
 
+const isView = (v: string | null): v is View =>
+  v === "day" || v === "week" || v === "month" || v === "overdue";
+
+/** Notifications link to `/?view=overdue` etc. (see reminder-sweep). */
+function viewFromUrl(url: string): View | null {
+  const v = new URL(url, "http://x").searchParams.get("view");
+  return isView(v) ? v : null;
+}
+
 function subscribeToOnline(callback: () => void) {
   window.addEventListener("online", callback);
   window.addEventListener("offline", callback);
@@ -38,7 +53,12 @@ function subscribeToOnline(callback: () => void) {
 
 export default function TaskApp({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<View>("day");
+  // TaskApp only mounts after the session resolves on the client, so
+  // `window` is always available here.
+  const [view, setView] = useState<View>(
+    () => viewFromUrl(window.location.href) ?? "day",
+  );
+  const [pushState, setPushState] = useState<PushState>("unsupported");
   const [showCompleted, setShowCompleted] = useState(false);
   const [creating, setCreating] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -59,6 +79,36 @@ export default function TaskApp({ session }: { session: Session }) {
   const userId = session.user.id;
 
   useEffect(() => startSync(userId), [userId]);
+
+  useEffect(() => {
+    refreshWebPush()
+      .catch((err) => console.error("Push refresh failed:", err))
+      .finally(() => webPushState().then(setPushState));
+  }, [userId]);
+
+  // A notification tapped while the app is already open: the service worker
+  // focuses this window and tells it which view to show.
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (e: MessageEvent) => {
+      if (e.data?.type !== "open-url") return;
+      const v = viewFromUrl(e.data.url);
+      if (v) setView(v);
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () =>
+      navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, []);
+
+  const enableReminders = async () => {
+    try {
+      setPushState(await enableWebPush());
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Couldn't enable reminders",
+      );
+    }
+  };
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30_000);
@@ -98,6 +148,9 @@ export default function TaskApp({ session }: { session: Session }) {
   const handleCreate = async (input: TaskInput) => {
     await run(() => createTask(input));
     setCreating(false);
+    // §6.7: ask for notification permission on first task creation, not on
+    // launch — that's when the user can see why it's needed.
+    if (pushState === "default") void enableReminders();
   };
 
   const handleUpdate = async (id: string, input: TaskInput) => {
@@ -188,6 +241,18 @@ export default function TaskApp({ session }: { session: Session }) {
           onCancel={() => setCreating(false)}
           onSubmit={handleCreate}
         />
+      )}
+
+      {pushState === "default" && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">
+          <span>Get reminders on this device before tasks are due.</span>
+          <button
+            onClick={enableReminders}
+            className="rounded-full bg-indigo-700 px-3 py-1 font-medium text-white"
+          >
+            Enable reminders
+          </button>
+        </div>
       )}
 
       {error && <p className="text-sm text-red-600">{error}</p>}

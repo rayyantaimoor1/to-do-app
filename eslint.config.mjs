@@ -12,6 +12,12 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Deno edge functions (npm:/jsr: specifiers) and Capacitor's generated
+    // Android project aren't part of the Next build. The shared reminder
+    // ladder is still linted/type-checked through src/lib/reminders.ts.
+    "supabase/functions/*/**",
+    "!supabase/functions/_shared/**",
+    "android/**",
   ]),
 ]);
 
