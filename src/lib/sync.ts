@@ -21,6 +21,64 @@ const isOnline = () =>
 const olderThan = (a: string, b: string) =>
   new Date(a).getTime() < new Date(b).getTime();
 
+// PostgrestError is a plain object with `message`, not always an Error.
+const errorMessage = (err: unknown) =>
+  (err as { message?: string })?.message ?? String(err);
+
+/**
+ * Sync problems the user should hear about (the UI shows them as toasts).
+ * Transient failures stay quiet — the outbox retries them — so this only
+ * fires when a change is discarded or a resync fails while online.
+ */
+export const syncEvents = new EventTarget();
+export type SyncErrorEvent = CustomEvent<string>;
+
+let lastReport = { message: "", at: 0 };
+
+function reportSyncError(message: string) {
+  // Resync runs on every reconnect and every return to the app; repeating
+  // the same failure each time would just be noise.
+  const now = Date.now();
+  if (message === lastReport.message && now - lastReport.at < 5 * 60_000) return;
+  lastReport = { message, at: now };
+  syncEvents.dispatchEvent(new CustomEvent("error", { detail: message }));
+}
+
+function describeSyncFailure(err: unknown): string {
+  const msg = errorMessage(err);
+  if (/failed to fetch|network|load failed/i.test(msg)) {
+    return "Can't reach the server. Your changes are saved on this device and will sync when it's back.";
+  }
+  return `Sync failed: ${msg}`;
+}
+
+// ─────────────────────────────────────────────────────────
+// Local data ownership
+// ─────────────────────────────────────────────────────────
+
+const OWNER_KEY = "owner_user_id";
+
+/**
+ * IndexedDB is per-browser, not per-account. If a different user signs in
+ * here, the previous user's tasks, queued writes and sync watermark must not
+ * leak into their session: the outbox would replay A's edits as B, and A's
+ * watermark would make B's first reconcile skip most of B's tasks.
+ */
+async function claimLocalData(userId: string): Promise<void> {
+  const owner = await getMeta(OWNER_KEY);
+  if (owner === userId) return;
+  if (owner) await clearLocalData();
+  await setMeta(OWNER_KEY, userId);
+}
+
+export async function clearLocalData(): Promise<void> {
+  await db.transaction("rw", db.tasks, db.outbox, db.meta, async () => {
+    await db.tasks.clear();
+    await db.outbox.clear();
+    await db.meta.clear();
+  });
+}
+
 // ─────────────────────────────────────────────────────────
 // Outbox flush
 // ─────────────────────────────────────────────────────────
@@ -56,6 +114,14 @@ async function flushOutbox(): Promise<void> {
       await pushEntry(entry);
       await db.outbox.delete(entry.seq);
     } catch (err) {
+      if (!isPermanentFailure(err)) {
+        // Unreachable server, 5xx, expired token: nothing is wrong with the
+        // write itself. Keep it, don't count it, and try again on the next
+        // flush. Counting these used to discard real edits after a few
+        // minutes of outage while navigator.onLine still said "online".
+        await db.outbox.update(entry.seq, { lastError: errorMessage(err) });
+        return;
+      }
       const attempts = entry.attempts + 1;
       if (attempts >= MAX_ATTEMPTS) {
         console.error(
@@ -64,11 +130,14 @@ async function flushOutbox(): Promise<void> {
           err,
         );
         await db.outbox.delete(entry.seq);
+        reportSyncError(
+          `A change couldn't be saved and was discarded: ${errorMessage(err)}`,
+        );
         continue;
       }
       await db.outbox.update(entry.seq, {
         attempts,
-        lastError: err instanceof Error ? err.message : String(err),
+        lastError: errorMessage(err),
       });
       // Stop rather than skip ahead: replaying later edits before earlier
       // ones is exactly the corruption the seq ordering exists to prevent.
@@ -77,14 +146,51 @@ async function flushOutbox(): Promise<void> {
   }
 }
 
+/** A write the server answered and refused, carrying the HTTP status. */
+class RejectedWrite extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Only a 4xx the server actually sent says the write itself is bad (RLS,
+ * check constraint...). A network failure comes back from supabase-js as
+ * status 0; 401 means the token needs refreshing; 408/429 are "later".
+ */
+function isPermanentFailure(err: unknown): boolean {
+  return (
+    err instanceof RejectedWrite &&
+    err.status >= 400 &&
+    err.status < 500 &&
+    ![401, 408, 429].includes(err.status)
+  );
+}
+
+function rejected(error: { message: string }, status: number): RejectedWrite {
+  return new RejectedWrite(error.message, status);
+}
+
 async function pushEntry(entry: OutboxEntry): Promise<void> {
   if (entry.op === "create") {
-    const { data, error } = await supabase
+    const { data, error, status } = await supabase
       .from("tasks")
       .insert(entry.payload!)
       .select()
       .single();
-    if (error) throw error;
+    if (error?.code === "23505") {
+      // Already there: an earlier attempt reached the server but its
+      // response was lost. The insert succeeded — adopt the server row.
+      const { data: existing, error: readError, status: readStatus } =
+        await supabase.from("tasks").select("*").eq("id", entry.taskId).single();
+      if (readError) throw rejected(readError, readStatus);
+      await db.tasks.put(existing as Task);
+      return;
+    }
+    if (error) throw rejected(error, status);
     // Take the server row verbatim. Its updated_at comes from the DB trigger,
     // so adopting it here keeps every later comparison server-clock-based and
     // immune to skew on this machine.
@@ -93,24 +199,24 @@ async function pushEntry(entry: OutboxEntry): Promise<void> {
   }
 
   if (entry.op === "update") {
-    const { data, error } = await supabase
+    const { data, error, status } = await supabase
       .from("tasks")
       .update(entry.payload!)
       .eq("id", entry.taskId)
       .select()
       .maybeSingle();
-    if (error) throw error;
+    if (error) throw rejected(error, status);
     // maybeSingle: the row may have been deleted on another device. That's
     // not an error — the delete simply won.
     if (data) await db.tasks.put(data as Task);
     return;
   }
 
-  const { error } = await supabase
+  const { error, status } = await supabase
     .from("tasks")
     .delete()
     .eq("id", entry.taskId);
-  if (error) throw error;
+  if (error) throw rejected(error, status);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -188,7 +294,8 @@ export async function reconcile(userId: string): Promise<void> {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-async function resync(userId: string): Promise<void> {
+async function resync(userId: string, ready: Promise<void>): Promise<void> {
+  await ready;
   if (!isOnline()) return;
   try {
     // Push local intent before pulling remote state, so reconcile sees a
@@ -200,10 +307,17 @@ async function resync(userId: string): Promise<void> {
     await loadProfile(userId);
   } catch (err) {
     console.error("Resync failed:", err);
+    // navigator.onLine can be true on a captive or flaky network; only
+    // bother the user when we still believe we're connected.
+    if (isOnline()) reportSyncError(describeSyncFailure(err));
   }
 }
 
 export function startSync(userId: string): () => void {
+  const ready = claimLocalData(userId).catch((err) => {
+    console.error("Couldn't prepare local data:", err);
+  });
+
   const channel = supabase
     .channel(`tasks:${userId}`)
     .on(
@@ -214,30 +328,31 @@ export function startSync(userId: string): () => void {
         table: "tasks",
         filter: `user_id=eq.${userId}`,
       },
-      (payload) => {
+      async (payload) => {
+        await ready;
         if (payload.eventType === "DELETE") {
           const id = (payload.old as { id?: string })?.id;
-          if (id) void applyRemoteDelete(id);
+          if (id) await applyRemoteDelete(id);
         } else {
-          void mergeRemoteTask(payload.new as Task);
+          await mergeRemoteTask(payload.new as Task);
         }
       },
     )
     .subscribe((status) => {
       // Fires on first connect and again after any reconnect, which is
       // precisely when the gap needs filling.
-      if (status === "SUBSCRIBED") void resync(userId);
+      if (status === "SUBSCRIBED") void resync(userId, ready);
     });
 
-  const onOnline = () => void resync(userId);
+  const onOnline = () => void resync(userId, ready);
   const onVisibility = () => {
-    if (document.visibilityState === "visible") void resync(userId);
+    if (document.visibilityState === "visible") void resync(userId, ready);
   };
 
   window.addEventListener("online", onOnline);
   document.addEventListener("visibilitychange", onVisibility);
 
-  void resync(userId);
+  void resync(userId, ready);
 
   return () => {
     window.removeEventListener("online", onOnline);

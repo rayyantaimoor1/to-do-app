@@ -1,8 +1,25 @@
 "use client";
 
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { supabase } from "@/lib/supabase";
 import { db } from "@/lib/db";
+import {
+  currentEndpoint,
+  unregisterThisDevice,
+  type PushState,
+} from "@/lib/push";
+import {
+  batteryOptimizationExempt,
+  requestBatteryExemption,
+} from "@/lib/notifications";
 import {
   PROFILE_KEY,
   deviceTimeZone,
@@ -14,7 +31,193 @@ import { minuteInRange, parseTimeOfDay } from "@/lib/reminders";
 
 interface SettingsProps {
   userId: string;
+  pushState: PushState;
+  onEnableReminders: () => Promise<void>;
+  onSignOutEverywhere: () => Promise<void>;
+  onShowShortcuts: () => void;
   onClose: () => void;
+}
+
+interface Device {
+  id: string;
+  platform: "web" | "android";
+  device_label: string | null;
+  endpoint: string;
+  last_seen_at: string;
+  created_at: string;
+}
+
+const PUSH_STATE_TEXT: Record<PushState, string> = {
+  enabled: "Reminders are on for this device.",
+  default: "Reminders are off for this device.",
+  denied:
+    "Notifications are blocked for this app. Allow them in your browser or phone settings, then reload.",
+  unsupported:
+    "This browser can't receive push reminders (or push isn't configured yet).",
+  "needs-production-build":
+    "Push only works in the installed/production build, not the dev server.",
+};
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function ThisDevice({
+  pushState,
+  onEnableReminders,
+}: {
+  pushState: PushState;
+  onEnableReminders: () => Promise<void>;
+}) {
+  const [batteryExempt, setBatteryExempt] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void batteryOptimizationExempt().then(setBatteryExempt);
+    // Re-check when returning from the system settings screen.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        void batteryOptimizationExempt().then(setBatteryExempt);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-zinc-600 dark:text-zinc-300">
+          {PUSH_STATE_TEXT[pushState]}
+        </span>
+        {pushState === "default" && (
+          <button
+            onClick={onEnableReminders}
+            className="shrink-0 rounded-full bg-indigo-700 px-3 py-1.5 text-xs font-medium text-white"
+          >
+            Enable
+          </button>
+        )}
+      </div>
+      {batteryExempt === false && (
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-zinc-600 dark:text-zinc-300">
+            Battery optimisation can delay reminders on this phone.
+          </span>
+          <button
+            onClick={() => void requestBatteryExemption()}
+            className="shrink-0 rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium dark:border-zinc-700"
+          >
+            Exempt app
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Devices({ userId }: { userId: string }) {
+  const [devices, setDevices] = useState<Device[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [thisEndpoint, setThisEndpoint] = useState<string | null>(null);
+
+  const fetchDevices = useCallback(
+    () =>
+      supabase
+        .from("push_subscriptions")
+        .select("id,platform,device_label,endpoint,last_seen_at,created_at")
+        .eq("user_id", userId)
+        .order("created_at"),
+    [userId],
+  );
+
+  const apply = ({ data, error }: Awaited<ReturnType<typeof fetchDevices>>) => {
+    if (error) setError("Couldn't load devices — are you online?");
+    else {
+      setError(null);
+      setDevices(data as Device[]);
+    }
+  };
+
+  const load = async () => apply(await fetchDevices());
+
+  useEffect(() => {
+    void currentEndpoint().then(setThisEndpoint);
+    void fetchDevices().then(({ data, error }) => {
+      if (error) setError("Couldn't load devices — are you online?");
+      else setDevices(data as Device[]);
+    });
+  }, [fetchDevices]);
+
+  const remove = async (device: Device) => {
+    const isThis = device.endpoint === thisEndpoint;
+    if (
+      !confirm(
+        `Stop sending reminders to "${device.device_label ?? device.platform}"?` +
+          (isThis ? " This is the device you're using." : ""),
+      )
+    ) {
+      return;
+    }
+    if (isThis) {
+      await unregisterThisDevice().catch(() => {});
+    } else {
+      const { error } = await supabase
+        .from("push_subscriptions")
+        .delete()
+        .eq("id", device.id);
+      if (error) {
+        setError(`Couldn't remove device: ${error.message}`);
+        return;
+      }
+    }
+    await load();
+  };
+
+  if (error) return <p className="text-sm text-red-600">{error}</p>;
+  if (!devices) return <p className="text-sm text-zinc-500">Loading...</p>;
+  if (!devices.length) {
+    return (
+      <p className="text-sm text-zinc-500">
+        No devices receive server reminders yet. Enable reminders on a device
+        to add it here.
+      </p>
+    );
+  }
+
+  return (
+    <ul className="flex flex-col divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
+      {devices.map((d) => (
+        <li key={d.id} className="flex items-center justify-between gap-3 py-2">
+          <div className="min-w-0">
+            <p className="truncate font-medium text-zinc-900 dark:text-zinc-50">
+              {d.device_label ?? d.platform}
+              {d.endpoint === thisEndpoint && (
+                <span className="ml-2 text-xs font-normal text-indigo-600">
+                  this device
+                </span>
+              )}
+            </p>
+            <p className="text-xs text-zinc-500">
+              {d.platform === "android" ? "Android app" : "Web"} · added{" "}
+              {formatDate(d.created_at)} · last synced{" "}
+              {formatDate(d.last_seen_at)}
+            </p>
+          </div>
+          <button
+            onClick={() => void remove(d)}
+            className="shrink-0 text-xs font-medium text-red-500 hover:text-red-700"
+          >
+            Remove
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 const hhmm = (t: string) => t.slice(0, 5);
@@ -182,7 +385,14 @@ function NotificationSettings({
   );
 }
 
-export default function Settings({ userId, onClose }: SettingsProps) {
+export default function Settings({
+  userId,
+  pushState,
+  onEnableReminders,
+  onSignOutEverywhere,
+  onShowShortcuts,
+  onClose,
+}: SettingsProps) {
   const profile = useLiveQuery(async () => {
     const row = await db.meta.get(PROFILE_KEY);
     return row ? (JSON.parse(row.value) as Profile) : null;
@@ -218,6 +428,40 @@ export default function Settings({ userId, onClose }: SettingsProps) {
             profile={profile}
           />
         )}
+      </Section>
+
+      <Section title="This device">
+        <ThisDevice
+          pushState={pushState}
+          onEnableReminders={onEnableReminders}
+        />
+      </Section>
+
+      <Section title="Devices receiving reminders">
+        <Devices userId={userId} />
+      </Section>
+
+      <Section title="Account">
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+          <span className="text-zinc-600 dark:text-zinc-300">
+            Signs out this account on every device, including this one.
+          </span>
+          <button
+            onClick={() => void onSignOutEverywhere()}
+            className="shrink-0 rounded-full border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 dark:border-red-900"
+          >
+            Sign out everywhere
+          </button>
+        </div>
+      </Section>
+
+      <Section title="Keyboard shortcuts">
+        <button
+          onClick={onShowShortcuts}
+          className="self-start rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium dark:border-zinc-700"
+        >
+          Show shortcuts ( ? )
+        </button>
       </Section>
     </div>
   );

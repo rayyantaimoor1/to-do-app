@@ -1,15 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Task, TaskInput } from "@/lib/tasks";
 import TaskForm from "./TaskForm";
 
 interface TaskItemProps {
   task: Task;
   now: number;
+  selected: boolean;
+  editing: boolean;
+  onSelect: () => void;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
   onToggle: (task: Task) => Promise<void>;
   onUpdate: (id: string, input: TaskInput) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
+  onDelete: (task: Task) => Promise<void>;
 }
 
 const PRIORITY_LABEL = ["Low", "Normal", "High"];
@@ -26,33 +31,49 @@ function formatDue(iso: string) {
 export default function TaskItem({
   task,
   now,
+  selected,
+  editing,
+  onSelect,
+  onStartEdit,
+  onCancelEdit,
   onToggle,
   onUpdate,
   onDelete,
 }: TaskItemProps) {
-  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   const isDone = task.status === "done";
   const isOverdue = !isDone && new Date(task.due_at).getTime() < now;
+
+  // Keyboard navigation (j/k) can move the selection off-screen.
+  useEffect(() => {
+    if (selected) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
 
   if (editing) {
     return (
       <TaskForm
         initial={task}
         submitLabel="Save"
-        onCancel={() => setEditing(false)}
-        onSubmit={async (input) => {
-          await onUpdate(task.id, input);
-          setEditing(false);
-        }}
+        onCancel={onCancelEdit}
+        onSubmit={(input) => onUpdate(task.id, input)}
       />
     );
   }
 
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+    <div
+      ref={ref}
+      onClick={onSelect}
+      className={`flex items-start gap-3 rounded-lg border bg-white p-3 dark:bg-zinc-900 ${
+        selected
+          ? "border-indigo-400 ring-2 ring-indigo-200 dark:border-indigo-500 dark:ring-indigo-900"
+          : "border-zinc-200 dark:border-zinc-800"
+      }`}
+    >
       <input
         type="checkbox"
+        aria-label={isDone ? "Mark as not done" : "Mark as done"}
         checked={isDone}
         disabled={busy}
         onChange={async () => {
@@ -65,9 +86,9 @@ export default function TaskItem({
         }}
         className="mt-1 h-4 w-4"
       />
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         <p
-          className={`text-sm font-medium ${
+          className={`break-words text-sm font-medium ${
             isDone
               ? "text-zinc-400 line-through"
               : "text-zinc-900 dark:text-zinc-50"
@@ -75,7 +96,9 @@ export default function TaskItem({
         >
           {task.title}
         </p>
-        {task.notes && <p className="text-xs text-zinc-500">{task.notes}</p>}
+        {task.notes && (
+          <p className="break-words text-xs text-zinc-500">{task.notes}</p>
+        )}
         <p
           className={`mt-1 text-xs ${
             isOverdue ? "font-medium text-red-600" : "text-zinc-400"
@@ -88,17 +111,17 @@ export default function TaskItem({
       </div>
       <div className="flex gap-2">
         <button
-          onClick={() => setEditing(true)}
+          onClick={onStartEdit}
           className="text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-50"
         >
           Edit
         </button>
         <button
+          disabled={busy}
           onClick={async () => {
-            if (!confirm(`Delete "${task.title}"?`)) return;
             setBusy(true);
             try {
-              await onDelete(task.id);
+              await onDelete(task);
             } finally {
               setBusy(false);
             }

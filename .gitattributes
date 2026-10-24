@@ -1,0 +1,2 @@
+# gradlew is a shell script; CRLF line endings break it on macOS/Linux.
+android/gradlew text eol=lf

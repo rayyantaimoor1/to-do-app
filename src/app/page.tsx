@@ -6,6 +6,7 @@ import { App } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
 import { supabase } from "@/lib/supabase";
 import { NATIVE_AUTH_REDIRECT, isNative } from "@/lib/platform";
+import { cancelAllAlarms } from "@/lib/notifications";
 import TaskApp from "@/components/TaskApp";
 
 export default function Home() {
@@ -20,8 +21,11 @@ export default function Home() {
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, newSession) => {
+      (event, newSession) => {
         setSession(newSession);
+        // Also covers being signed out from another device ("Sign out
+        // everywhere"): don't leave alarms for that account on this phone.
+        if (event === "SIGNED_OUT") void cancelAllAlarms().catch(() => {});
       },
     );
 
