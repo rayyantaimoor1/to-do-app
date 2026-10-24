@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "todo-app-static",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "-s", "out", "-l", "4000"],
+      "port": 4000
     }
   ]
 }
