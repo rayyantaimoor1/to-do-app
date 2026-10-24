@@ -43,4 +43,8 @@ next-env.d.ts
 
 # android signing (M7)
 *.keystore
+*.jks
 /android/app/release
+/android/keystore.properties
+# Firebase config for FCM — project-specific, keep out of the repo
+/android/app/google-services.json

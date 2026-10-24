@@ -1,5 +1,11 @@
 import { supabase } from "@/lib/supabase";
 import { getMeta, setMeta, db } from "@/lib/db";
+import { FCM_ENABLED, isNative } from "@/lib/platform";
+import {
+  fcmToken,
+  nativePermission,
+  requestNativePermission,
+} from "@/lib/notifications";
 
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ?? "";
 const ENDPOINT_KEY = "push_endpoint";
@@ -14,6 +20,8 @@ export type PushState =
 export function webPushSupported(): boolean {
   return (
     typeof window !== "undefined" &&
+    // Android WebView has no Push API; the APK uses FCM instead.
+    !isNative() &&
     "serviceWorker" in navigator &&
     "PushManager" in window &&
     "Notification" in window &&
@@ -115,6 +123,52 @@ export async function refreshWebPush(): Promise<void> {
   const reg = await registration();
   const sub = await reg?.pushManager.getSubscription();
   if (sub) await saveSubscription(sub);
+}
+
+// ─────────────────────────────────────────────────────────
+// Platform-neutral entry points used by the UI
+// ─────────────────────────────────────────────────────────
+
+async function registerFcm(): Promise<void> {
+  const token = await fcmToken();
+  const { error } = await supabase.rpc("register_device", {
+    p_platform: "android",
+    p_endpoint: token,
+    p_p256dh: null,
+    p_auth_key: null,
+    p_device_label: "Android app",
+  });
+  if (error) throw error;
+  await setMeta(ENDPOINT_KEY, token);
+}
+
+/** Whether this device will show reminders: web push, or Android alarms. */
+export async function notificationState(): Promise<PushState> {
+  if (!isNative()) return webPushState();
+  const p = await nativePermission();
+  return p === "granted" ? "enabled" : p === "denied" ? "denied" : "default";
+}
+
+export async function enableNotifications(): Promise<PushState> {
+  if (!isNative()) return enableWebPush();
+  if ((await requestNativePermission()) !== "granted") return "denied";
+  // Local alarms work from here on. FCM (overdue nags, digest) is extra and
+  // must not block them if Firebase isn't set up or the device is offline.
+  if (FCM_ENABLED) {
+    await registerFcm().catch((err) =>
+      console.error("FCM registration failed:", err),
+    );
+  }
+  return "enabled";
+}
+
+/** Startup: keep this device's push registration fresh. */
+export async function refreshNotifications(): Promise<void> {
+  if (!navigator.onLine) return;
+  if (!isNative()) return refreshWebPush();
+  if (FCM_ENABLED && (await nativePermission()) === "granted") {
+    await registerFcm();
+  }
 }
 
 /** The endpoint this device registered with, if any (web or FCM). */

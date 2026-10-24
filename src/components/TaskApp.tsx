@@ -7,11 +7,12 @@ import { supabase } from "@/lib/supabase";
 import { db } from "@/lib/db";
 import { startSync } from "@/lib/sync";
 import {
-  enableWebPush,
-  refreshWebPush,
-  webPushState,
+  enableNotifications,
+  notificationState,
+  refreshNotifications,
   type PushState,
 } from "@/lib/push";
+import NativeBridge from "./NativeBridge";
 import {
   createTask,
   deleteTask,
@@ -83,9 +84,9 @@ export default function TaskApp({ session }: { session: Session }) {
   useEffect(() => startSync(userId), [userId]);
 
   useEffect(() => {
-    refreshWebPush()
+    refreshNotifications()
       .catch((err) => console.error("Push refresh failed:", err))
-      .finally(() => webPushState().then(setPushState));
+      .finally(() => notificationState().then(setPushState));
   }, [userId]);
 
   // A notification tapped while the app is already open: the service worker
@@ -104,7 +105,7 @@ export default function TaskApp({ session }: { session: Session }) {
 
   const enableReminders = async () => {
     try {
-      setPushState(await enableWebPush());
+      setPushState(await enableNotifications());
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Couldn't enable reminders",
@@ -171,6 +172,12 @@ export default function TaskApp({ session }: { session: Session }) {
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-4 px-4 py-8">
+      <NativeBridge
+        onOpenUrl={(url) => {
+          const v = viewFromUrl(url);
+          if (v) setView(v);
+        }}
+      />
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">

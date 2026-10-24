@@ -42,17 +42,21 @@ $$;
 revoke execute on function public.register_device(text, text, text, text, text) from public, anon;
 grant  execute on function public.register_device(text, text, text, text, text) to authenticated;
 
--- Android bumps last_seen_at every time it reschedules its local alarms. The
--- sweep compares it with tasks.updated_at to decide whether the phone already
--- has an alarm for a reminder (skip server push) or not (send as backup).
--- now() is the server clock, the same clock that writes tasks.updated_at.
-create function public.touch_device(p_endpoint text) returns void
+-- After rescheduling its local alarms, Android reports the newest server
+-- tasks.updated_at it has applied. The sweep compares that with each task's
+-- updated_at to decide whether the phone already has an alarm for a reminder
+-- (skip server push) or not (send as backup). Using a server timestamp the
+-- phone has actually seen — not now() — means an edit still in flight over
+-- Realtime is never mistaken for one the phone has scheduled. Clamped to
+-- now() so a bad value can't suppress backups for future edits.
+create function public.touch_device(p_endpoint text, p_synced_through timestamptz)
+returns void
 language sql security invoker set search_path = '' as $$
   update public.push_subscriptions
-     set last_seen_at = now()
+     set last_seen_at = greatest(last_seen_at, least(p_synced_through, now()))
    where endpoint = p_endpoint
      and user_id = auth.uid();
 $$;
 
-revoke execute on function public.touch_device(text) from public, anon;
-grant  execute on function public.touch_device(text) to authenticated;
+revoke execute on function public.touch_device(text, timestamptz) from public, anon;
+grant  execute on function public.touch_device(text, timestamptz) to authenticated;

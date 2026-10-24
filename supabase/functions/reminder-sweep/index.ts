@@ -227,8 +227,13 @@ async function sendAndroid(sub: Subscription, msg: Message) {
 /**
  * Android devices schedule lead/due reminders as local alarms (M7). Server
  * push for those is only a backup, for when the phone hasn't synced since the
- * task last changed — `last_seen_at` is bumped (server clock) every time the
- * phone reschedules its alarms. Overdue nags and digests always go out.
+ * task last changed. After rescheduling, the phone sets `last_seen_at` to the
+ * newest server `updated_at` it has applied (touch_device). Overdue nags and
+ * digests always go out.
+ *
+ * This replaces the PLAN.md §6.5 "same notification tag" dedup on Android:
+ * Capacitor local notifications are posted by numeric id with no tag, so a
+ * local alarm and an FCM message for the same reminder would both show.
  */
 function wantsDelivery(sub: Subscription, reminder: Reminder | null, task?: TaskRow) {
   if (sub.platform === "web") return true;

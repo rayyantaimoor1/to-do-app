@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect } from "react";
+import { isNative } from "@/lib/platform";
 
 export default function RegisterServiceWorker() {
   useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
+    // The APK ships its assets locally and gets push via FCM; a service
+    // worker would only add a stale-cache layer there.
+    if (isNative() || !("serviceWorker" in navigator)) return;
 
     // In dev, Turbopack rebuilds change chunk URLs constantly and HMR needs
     // an uncached channel to the server. A service worker sitting in the
