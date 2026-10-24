@@ -2,7 +2,7 @@
 
 A personal task app with deadline reminders, installable on Windows and Android, syncing in real time, built to support multiple users from day one.
 
-**Status:** Spec complete, not yet implemented.
+**Status:** Implemented (M1–M8). Deployment steps are in [SETUP.md](SETUP.md), which also lists where the implementation differs from this spec.
 **Budget:** $0/month.
 
 ---
