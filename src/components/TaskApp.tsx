@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
+import { db } from "@/lib/db";
+import { startSync } from "@/lib/sync";
 import {
   createTask,
   deleteTask,
-  fetchTasks,
   setTaskStatus,
   updateTask,
   type Task,
@@ -25,33 +27,38 @@ const VIEWS: { key: View; label: string }[] = [
   { key: "overdue", label: "Overdue" },
 ];
 
+function subscribeToOnline(callback: () => void) {
+  window.addEventListener("online", callback);
+  window.addEventListener("offline", callback);
+  return () => {
+    window.removeEventListener("online", callback);
+    window.removeEventListener("offline", callback);
+  };
+}
+
 export default function TaskApp({ session }: { session: Session }) {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>("day");
   const [showCompleted, setShowCompleted] = useState(false);
   const [creating, setCreating] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchTasks()
-      .then((data) => {
-        if (!cancelled) setTasks(data);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load tasks");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Prerender has no `navigator`, so the server snapshot optimistically
+  // reports online; the client corrects it on hydration.
+  const online = useSyncExternalStore(
+    subscribeToOnline,
+    () => navigator.onLine,
+    () => true,
+  );
+
+  // Reads come straight from IndexedDB and re-render on every local write,
+  // so the UI never waits on the network.
+  const tasks = useLiveQuery(() => db.tasks.toArray(), []);
+  const pendingCount = useLiveQuery(() => db.outbox.count(), [], 0);
+
+  const userId = session.user.id;
+
+  useEffect(() => startSync(userId), [userId]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30_000);
@@ -65,7 +72,7 @@ export default function TaskApp({ session }: { session: Session }) {
       week: 7 * DAY_MS,
       month: 30 * DAY_MS,
     };
-    return tasks
+    return (tasks ?? [])
       .filter((t) => {
         const dueTime = new Date(t.due_at).getTime();
         const isOverdue = t.status === "open" && dueTime < now;
@@ -74,31 +81,37 @@ export default function TaskApp({ session }: { session: Session }) {
         if (t.status === "done" && !showCompleted) return false;
         return dueTime <= now + HORIZON_MS[view];
       })
-      .sort((a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime());
+      .sort(
+        (a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime(),
+      );
   }, [tasks, view, showCompleted, now]);
 
+  const run = async (fn: () => Promise<unknown>) => {
+    try {
+      setError(null);
+      await fn();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
+    }
+  };
+
   const handleCreate = async (input: TaskInput) => {
-    const task = await createTask(input);
-    setTasks((prev) => [...prev, task]);
+    await run(() => createTask(input));
     setCreating(false);
   };
 
   const handleUpdate = async (id: string, input: TaskInput) => {
-    const updated = await updateTask(id, input);
-    setTasks((prev) => prev.map((t) => (t.id === id ? updated : t)));
+    await run(() => updateTask(id, input));
   };
 
   const handleToggle = async (task: Task) => {
-    const updated = await setTaskStatus(
-      task.id,
-      task.status === "done" ? "open" : "done",
+    await run(() =>
+      setTaskStatus(task.id, task.status === "done" ? "open" : "done"),
     );
-    setTasks((prev) => prev.map((t) => (t.id === task.id ? updated : t)));
   };
 
   const handleDelete = async (id: string) => {
-    await deleteTask(id);
-    setTasks((prev) => prev.filter((t) => t.id !== id));
+    await run(() => deleteTask(id));
   };
 
   return (
@@ -110,12 +123,27 @@ export default function TaskApp({ session }: { session: Session }) {
           </h1>
           <p className="text-xs text-zinc-500">{session.user.email}</p>
         </div>
-        <button
-          onClick={() => supabase.auth.signOut()}
-          className="rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium dark:border-zinc-700"
-        >
-          Sign out
-        </button>
+        <div className="flex items-center gap-3">
+          <span
+            className={`text-xs font-medium ${
+              online ? "text-zinc-400" : "text-amber-600"
+            }`}
+            title={
+              pendingCount
+                ? `${pendingCount} change(s) waiting to sync`
+                : undefined
+            }
+          >
+            {online ? "Online" : "Offline"}
+            {pendingCount ? ` · ${pendingCount} pending` : ""}
+          </span>
+          <button
+            onClick={() => supabase.auth.signOut()}
+            className="rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium dark:border-zinc-700"
+          >
+            Sign out
+          </button>
+        </div>
       </header>
 
       <nav className="flex gap-1 rounded-full bg-zinc-100 p-1 dark:bg-zinc-900">
@@ -164,7 +192,7 @@ export default function TaskApp({ session }: { session: Session }) {
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      {loading ? (
+      {tasks === undefined ? (
         <p className="text-sm text-zinc-500">Loading tasks...</p>
       ) : visibleTasks.length === 0 ? (
         <p className="text-sm text-zinc-500">Nothing here.</p>
