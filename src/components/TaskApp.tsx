@@ -23,6 +23,7 @@ import {
 } from "@/lib/tasks";
 import TaskForm from "./TaskForm";
 import TaskItem from "./TaskItem";
+import Settings from "./Settings";
 
 type View = TaskScope | "overdue";
 
@@ -61,6 +62,7 @@ export default function TaskApp({ session }: { session: Session }) {
   const [pushState, setPushState] = useState<PushState>("unsupported");
   const [showCompleted, setShowCompleted] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   // Prerender has no `navigator`, so the server snapshot optimistically
@@ -191,6 +193,12 @@ export default function TaskApp({ session }: { session: Session }) {
             {pendingCount ? ` · ${pendingCount} pending` : ""}
           </span>
           <button
+            onClick={() => setShowSettings((s) => !s)}
+            className="rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium dark:border-zinc-700"
+          >
+            Settings
+          </button>
+          <button
             onClick={() => supabase.auth.signOut()}
             className="rounded-full border border-zinc-300 px-3 py-1.5 text-xs font-medium dark:border-zinc-700"
           >
@@ -198,6 +206,11 @@ export default function TaskApp({ session }: { session: Session }) {
           </button>
         </div>
       </header>
+
+      {showSettings ? (
+        <Settings userId={userId} onClose={() => setShowSettings(false)} />
+      ) : (
+        <>
 
       <nav className="flex gap-1 rounded-full bg-zinc-100 p-1 dark:bg-zinc-900">
         {VIEWS.map((v) => (
@@ -274,6 +287,8 @@ export default function TaskApp({ session }: { session: Session }) {
             />
           ))}
         </div>
+      )}
+        </>
       )}
     </div>
   );

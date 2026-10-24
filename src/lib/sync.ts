@@ -1,5 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { db, getMeta, setMeta, LAST_SYNC_KEY, type OutboxEntry } from "@/lib/db";
+import { loadProfile } from "@/lib/profile";
 import type { Task } from "@/lib/types";
 
 /**
@@ -194,6 +195,9 @@ async function resync(userId: string): Promise<void> {
     // server that already reflects this device's edits.
     await requestFlush();
     await reconcile(userId);
+    // Settings changed on another device (quiet hours, digest time) must
+    // reach this one's cache too — local alarms read it.
+    await loadProfile(userId);
   } catch (err) {
     console.error("Resync failed:", err);
   }
