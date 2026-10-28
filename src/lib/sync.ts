@@ -330,12 +330,24 @@ export function startSync(userId: string): () => void {
       },
       async (payload) => {
         await ready;
-        if (payload.eventType === "DELETE") {
-          const id = (payload.old as { id?: string })?.id;
-          if (id) await applyRemoteDelete(id);
-        } else {
+        if (payload.eventType !== "DELETE") {
           await mergeRemoteTask(payload.new as Task);
         }
+      },
+    )
+    // Realtime can't evaluate a column filter against a deleted row (the old
+    // record carries only the primary key), so a `user_id=eq.` subscription
+    // never receives DELETEs. Listen to deletes unfiltered instead. Postgres
+    // can't apply RLS to a row that no longer exists, so this channel may
+    // also see other users' deleted ids — bare UUIDs with no content, and
+    // applyRemoteDelete is a no-op for ids that aren't in this device's cache.
+    .on(
+      "postgres_changes",
+      { event: "DELETE", schema: "public", table: "tasks" },
+      async (payload) => {
+        await ready;
+        const id = (payload.old as { id?: string })?.id;
+        if (id) await applyRemoteDelete(id);
       },
     )
     .subscribe((status) => {
